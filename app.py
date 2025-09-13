@@ -1,10 +1,11 @@
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pydantic import ConfigDict  # ← added
 import requests
 
-app = FastAPI(title="Agent Brain for Samairas", version="0.1")
+app = FastAPI(title="Agent Brain for Samaira’s", version="0.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,11 +15,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BIZ_NAME = 'Samairas Spa and Wellness'
-HOURS = 'Mon–Sat 10am–6pm; Sun Closed'
-PRICING = '$80 to $1100 *'
-POLICY = '24h cancel; $25 late; 50% no-show; deposits for groups'
+# --- Basic business data (loaded earlier from your CSV in our template) ---
+BIZ_NAME = "Samaira’s Spa and Wellness"
+HOURS = "Mon–Sat 10am–6pm; Sun Closed"
+PRICING = "$80 to $1100"
+POLICY = "24h cancel; $25 late; 50% no-show; deposits for groups"
 
+# --- Ollama optional settings ---
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
 USE_OLLAMA = os.getenv("USE_OLLAMA", "auto")  # 'yes' | 'no' | 'auto'
@@ -26,10 +29,17 @@ USE_OLLAMA = os.getenv("USE_OLLAMA", "auto")  # 'yes' | 'no' | 'auto'
 class AgentRequest(BaseModel):
     input: str
     conversation: dict | None = None
+    # ← added: ignore any extra fields ElevenLabs sends
+    model_config = ConfigDict(extra='ignore')
 
 @app.get("/ping")
 def ping():
     return {"ok": True, "service": "agent-brain", "business": BIZ_NAME}
+
+# ← added: simple GET endpoint so ElevenLabs can probe /agent
+@app.get("/agent")
+def agent_get():
+    return {"output": "Hello from Samaira’s backend."}
 
 def rule_based_reply(text: str) -> str:
     t = text.lower()
@@ -70,6 +80,7 @@ async def agent(req: AgentRequest):
     if not user_text:
         return {"output": "Hello! How can I help you today?"}
 
+    # decide whether to try Ollama
     use_llm = False
     if USE_OLLAMA == "yes":
         use_llm = True
@@ -82,9 +93,5 @@ async def agent(req: AgentRequest):
         except Exception:
             use_llm = False
 
-    if use_llm:
-        reply = ollama_reply(user_text)
-    else:
-        reply = rule_based_reply(user_text)
-
+    reply = ollama_reply(user_text) if use_llm else rule_based_reply(user_text)
     return {"output": reply}
