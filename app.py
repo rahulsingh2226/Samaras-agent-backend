@@ -1,12 +1,15 @@
-import os, json
+import os, json, base64, asyncio
 from time import time
+import audioop  # stdlib (for μ-law/PCM conversions)
+import requests
+import websockets  # pip install websockets
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict
-import requests
 
-app = FastAPI(title="Agent Brain for Samaira’s", version="0.5")
+app = FastAPI(title="Agent Brain for Samaira’s", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,22 +17,28 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- Business data (demo) ---
+# ---- Demo business data ----
 BIZ_NAME = "Samaira’s Spa and Wellness"
 HOURS = "Monday to Saturday 10am–6pm; Sunday Closed"
 PRICING = "$80 to $1100"
-POLICY = "24 hour cancel; $25 late; 50% no-show; deposits for groups"
+POLICY = "24 hour free cancellation; $25 late; 50% no-show; deposits for groups"
 
-# --- Optional local LLM (Ollama) ---
+# ---- Optional local LLM (Ollama) ----
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
 USE_OLLAMA = os.getenv("USE_OLLAMA", "auto")  # 'yes'|'no'|'auto'
+
+# ---- ElevenLabs Realtime (set these in Render → Environment) ----
+ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY", "demo123")       # <-- put your real key in Render
+ELEVEN_AGENT_ID = os.getenv("ELEVEN_AGENT_ID", "YOUR_AGENT_ID")# <-- set your agent id in Render
+ELEVEN_WS       = f"wss://api.elevenlabs.io/v1/realtime?agent_id={ELEVEN_AGENT_ID}"
 
 class AgentRequest(BaseModel):
     input: str
     conversation: dict | None = None
     model_config = ConfigDict(extra='ignore')
 
+# ---------- Health / simple test ----------
 @app.get("/ping")
 def ping():
     return {"ok": True, "service": "agent-brain", "business": BIZ_NAME}
@@ -38,7 +47,7 @@ def ping():
 def agent_get():
     return {"output": "Hello from Samaira’s backend."}
 
-# --- Simple FAQ logic ---
+# ---------- Simple FAQ logic ----------
 def rule_based_reply(text: str) -> str:
     t = (text or "").lower()
     if any(k in t for k in ["hour", "open", "close", "when are you open"]):
@@ -62,7 +71,6 @@ def rule_based_reply(text: str) -> str:
         return "Yes, we offer gift cards for all services and packages. They make a great present!"
     return "I can help with hours, services, pricing, booking, policies, payments, and gift cards. What would you like to know?"
 
-# --- Optional Ollama ---
 def ollama_reply(text: str) -> str:
     system = ("You are Sarah, a calm, warm, helpful assistant for a spa. "
               "Answer briefly (1–2 sentences). If outside scope, offer to transfer to a human.")
@@ -89,7 +97,7 @@ def generate_reply(user_text: str) -> str:
         pass
     return rule_based_reply(user_text)
 
-# --- Manual test endpoint ---
+# ---------- Manual POST test ----------
 @app.post("/agent")
 async def agent(req: AgentRequest):
     user_text = (req.input or "").strip()
@@ -97,9 +105,10 @@ async def agent(req: AgentRequest):
         return {"output": "Hello! How can I help you today?"}
     return {"output": generate_reply(user_text)}
 
-# --- Twilio entrypoint: returns TwiML to start audio stream ---
+# ---------- Twilio: return TwiML to start media stream ----------
 @app.post("/twilio-voice")
 def twilio_voice():
+    # Twilio will try to open a WS to /twilio-stream
     twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -108,20 +117,80 @@ def twilio_voice():
 </Response>"""
     return PlainTextResponse(twiml, media_type="application/xml")
 
-# --- WebSocket endpoint: Twilio streams audio here ---
+# ---------- Twilio <Stream> ⇄ ElevenLabs Realtime bridge ----------
 @app.websocket("/twilio-stream")
 async def twilio_stream(ws: WebSocket):
     await ws.accept()
     try:
-        while True:
-            msg = await ws.receive_text()
-            # Right now we just log/ack — integration with ElevenLabs realtime comes next
-            print("Twilio stream frame:", msg[:100])  # preview first chars
-            await ws.send_text('{"event":"keepalive"}')
-    except WebSocketDisconnect:
-        print("Twilio stream disconnected")
+        async with websockets.connect(
+            ELEVEN_WS,
+            extra_headers={"Authorization": f"Bearer {ELEVEN_API_KEY}"}
+        ) as elws:
+            samples_accum = bytearray()
+            last_commit = asyncio.get_event_loop().time()
 
-# --- OpenAI-compatible endpoints (for ElevenLabs web demo) ---
+            async def twilio_to_eleven():
+                nonlocal samples_accum, last_commit
+                while True:
+                    msg = await ws.receive_text()
+                    data = json.loads(msg)
+                    ev = data.get("event")
+
+                    if ev == "media":
+                        b64 = data["media"]["payload"]          # μ-law 8k from Twilio
+                        mulaw_8k = base64.b64decode(b64)
+                        pcm16_8k = audioop.ulaw2lin(mulaw_8k, 2) # μ-law → PCM16
+                        pcm16_16k, _ = audioop.ratecv(pcm16_8k, 2, 1, 8000, 16000, None)  # 8k→16k
+                        samples_accum.extend(pcm16_16k)
+
+                        now = asyncio.get_event_loop().time()
+                        # ship every ~120ms or >3200 bytes
+                        if len(samples_accum) > 3200 or (now - last_commit) > 0.12:
+                            chunk_b64 = base64.b64encode(bytes(samples_accum)).decode()
+                            await elws.send(json.dumps({"type": "input_audio_buffer.append", "audio": chunk_b64}))
+                            await elws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                            samples_accum.clear()
+                            last_commit = now
+
+                    elif ev == "stop":
+                        if samples_accum:
+                            chunk_b64 = base64.b64encode(bytes(samples_accum)).decode()
+                            await elws.send(json.dumps({"type": "input_audio_buffer.append", "audio": chunk_b64}))
+                            await elws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                            samples_accum.clear()
+                        break
+                    # ev == "start" → nothing special required here
+
+            async def eleven_to_twilio():
+                async for raw in elws:
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+
+                    if data.get("type") in ("output_audio.delta", "audio"):
+                        b64 = data.get("audio")
+                        if not b64:
+                            continue
+                        pcm16_16k = base64.b64decode(b64)
+                        pcm16_8k, _ = audioop.ratecv(pcm16_16k, 2, 1, 16000, 8000, None)  # 16k→8k
+                        mulaw_8k = audioop.lin2ulaw(pcm16_8k, 2)                             # PCM16 → μ-law
+                        payload = base64.b64encode(mulaw_8k).decode()
+                        await ws.send_text(json.dumps({"event": "media", "media": {"payload": payload}}))
+
+                    if data.get("type") in ("output_audio.done", "response_done"):
+                        # optional: end-of-utterance markers
+                        pass
+
+            await asyncio.gather(twilio_to_eleven(), eleven_to_twilio())
+
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        print("Stream bridge error:", e)
+        return
+
+# ---------- OpenAI-compatible endpoints (web demo) ----------
 @app.get("/v1/models")
 def list_models():
     return {"object": "list", "data": [{"id": "samaira-agent", "object": "model"}]}
@@ -134,7 +203,6 @@ async def chat_completions(payload: dict):
         if m and m.get("role") == "user":
             user_text = (m.get("content") or "").strip()
             break
-
     reply = generate_reply(user_text)
     model = payload.get("model", "samaira-agent")
     stream = bool(payload.get("stream"))
