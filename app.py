@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 
-app = FastAPI(title="Agent Brain for Samaira’s", version="1.1")
+app = FastAPI(title="Agent Brain for Samaira’s", version="1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,7 +21,7 @@ app.add_middleware(
 BIZ_NAME = "Samaira’s Spa and Wellness"
 HOURS = "Monday to Saturday 10am–6pm; Sunday Closed"
 PRICING = "$80 to $1100"
-POLICY = "Before 24 hours free cancellation; $25 late; 50% no-show; deposits for groups"
+POLICY = "Free 24 hour cancellation; $25 late; 50% no-show; deposits for groups"
 
 # ---- Optional local LLM (Ollama) ----
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -31,7 +31,22 @@ USE_OLLAMA = os.getenv("USE_OLLAMA", "auto")  # 'yes'|'no'|'auto'
 # ---- ElevenLabs Realtime ----
 ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY")
 ELEVEN_AGENT_ID = os.getenv("ELEVEN_AGENT_ID")
-ELEVEN_WS       = f"wss://api.elevenlabs.io/v1/realtime?agent_id={ELEVEN_AGENT_ID}"
+ELEVEN_WS       = f"wss://api.elevenlabs.io/v1/convai/conversation?agent_id={ELEVEN_AGENT_ID}"
+
+def get_eleven_ws():
+    """Try to fetch signed WS URL for private agents, fallback to static WS."""
+    try:
+        r = requests.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
+            params={"agent_id": ELEVEN_AGENT_ID},
+            headers={"xi-api-key": ELEVEN_API_KEY},
+            timeout=5,
+        )
+        if r.ok and r.json().get("signed_url"):
+            return r.json()["signed_url"]
+    except Exception:
+        pass
+    return ELEVEN_WS
 
 class AgentRequest(BaseModel):
     input: str
@@ -116,7 +131,6 @@ def twilio_voice():
             statusCallbackEvent="start mark stop"/>
   </Connect>
 </Response>"""
-
     return PlainTextResponse(twiml, media_type="application/xml")
 
 # ---------- Twilio <Stream> ⇄ ElevenLabs Realtime bridge ----------
@@ -124,10 +138,7 @@ def twilio_voice():
 async def twilio_stream(ws: WebSocket):
     await ws.accept()
     try:
-        async with websockets.connect(
-            ELEVEN_WS,
-            extra_headers={"Authorization": f"Bearer {ELEVEN_API_KEY}"}
-        ) as elws:
+        async with websockets.connect(get_eleven_ws()) as elws:
             samples_accum = bytearray()
             last_commit = asyncio.get_event_loop().time()
 
@@ -139,11 +150,7 @@ async def twilio_stream(ws: WebSocket):
                     ev = data.get("event")
 
                     if ev == "start":
-                        # acknowledge start so Twilio knows we’re alive
-                        await ws.send_text(json.dumps({
-                            "event": "mark",
-                            "mark": {"name": "started"}
-                        }))
+                        await ws.send_text(json.dumps({"event": "mark", "mark": {"name": "started"}}))
                         continue
 
                     if ev == "media":
@@ -156,16 +163,18 @@ async def twilio_stream(ws: WebSocket):
                         now = asyncio.get_event_loop().time()
                         if len(samples_accum) > 3200 or (now - last_commit) > 0.12:
                             chunk_b64 = base64.b64encode(bytes(samples_accum)).decode()
-                            await elws.send(json.dumps({"type": "input_audio_buffer.append", "audio": chunk_b64}))
-                            await elws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                            await elws.send(json.dumps({
+                                "user_audio_chunk": chunk_b64
+                            }))
                             samples_accum.clear()
                             last_commit = now
 
                     elif ev == "stop":
                         if samples_accum:
                             chunk_b64 = base64.b64encode(bytes(samples_accum)).decode()
-                            await elws.send(json.dumps({"type": "input_audio_buffer.append", "audio": chunk_b64}))
-                            await elws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                            await elws.send(json.dumps({
+                                "user_audio_chunk": chunk_b64
+                            }))
                             samples_accum.clear()
                         break
 
@@ -175,8 +184,8 @@ async def twilio_stream(ws: WebSocket):
                         data = json.loads(raw)
                     except Exception:
                         continue
-                    if data.get("type") in ("output_audio.delta", "audio"):
-                        b64 = data.get("audio")
+                    if data.get("type") == "audio" and "audio_event" in data:
+                        b64 = data["audio_event"].get("audio_base_64")
                         if not b64:
                             continue
                         pcm16_16k = base64.b64decode(b64)
@@ -186,7 +195,6 @@ async def twilio_stream(ws: WebSocket):
                         await ws.send_text(json.dumps({"event": "media", "media": {"payload": payload}}))
 
             async def keepalive():
-                # send a Twilio mark every 8s to keep stream from idling out
                 while True:
                     await asyncio.sleep(8)
                     await ws.send_text(json.dumps({"event": "mark", "mark": {"name": "keepalive"}}))
@@ -198,7 +206,6 @@ async def twilio_stream(ws: WebSocket):
     except Exception as e:
         print("Stream bridge error:", e)
         return
-
 
 # ---------- OpenAI-compatible endpoints ----------
 @app.get("/v1/models")
