@@ -5,3 +5,4 @@ gunicorn
 requests
 pydantic
 audioop-lts
+websockets
