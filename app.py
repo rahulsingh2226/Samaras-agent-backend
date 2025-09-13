@@ -1,15 +1,15 @@
 import os, json, base64, asyncio
 from time import time
-import audioop  # stdlib (for μ-law/PCM conversions)
+import audioop
 import requests
-import websockets  # pip install websockets
+import websockets
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 
-app = FastAPI(title="Agent Brain for Samaira’s", version="1.0")
+app = FastAPI(title="Agent Brain for Samaira’s", version="1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,16 +21,16 @@ app.add_middleware(
 BIZ_NAME = "Samaira’s Spa and Wellness"
 HOURS = "Monday to Saturday 10am–6pm; Sunday Closed"
 PRICING = "$80 to $1100"
-POLICY = "24 hour free cancellation; $25 late; 50% no-show; deposits for groups"
+POLICY = "Before 24 hours free cancellation; $25 late; 50% no-show; deposits for groups"
 
 # ---- Optional local LLM (Ollama) ----
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
 USE_OLLAMA = os.getenv("USE_OLLAMA", "auto")  # 'yes'|'no'|'auto'
 
-# ---- ElevenLabs Realtime (set these in Render → Environment) ----
-ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY", "demo123")       # <-- put your real key in Render
-ELEVEN_AGENT_ID = os.getenv("ELEVEN_AGENT_ID", "YOUR_AGENT_ID")# <-- set your agent id in Render
+# ---- ElevenLabs Realtime ----
+ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY")
+ELEVEN_AGENT_ID = os.getenv("ELEVEN_AGENT_ID")
 ELEVEN_WS       = f"wss://api.elevenlabs.io/v1/realtime?agent_id={ELEVEN_AGENT_ID}"
 
 class AgentRequest(BaseModel):
@@ -108,7 +108,6 @@ async def agent(req: AgentRequest):
 # ---------- Twilio: return TwiML to start media stream ----------
 @app.post("/twilio-voice")
 def twilio_voice():
-    # Twilio will try to open a WS to /twilio-stream
     twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -137,14 +136,13 @@ async def twilio_stream(ws: WebSocket):
                     ev = data.get("event")
 
                     if ev == "media":
-                        b64 = data["media"]["payload"]          # μ-law 8k from Twilio
+                        b64 = data["media"]["payload"]
                         mulaw_8k = base64.b64decode(b64)
-                        pcm16_8k = audioop.ulaw2lin(mulaw_8k, 2) # μ-law → PCM16
-                        pcm16_16k, _ = audioop.ratecv(pcm16_8k, 2, 1, 8000, 16000, None)  # 8k→16k
+                        pcm16_8k = audioop.ulaw2lin(mulaw_8k, 2)
+                        pcm16_16k, _ = audioop.ratecv(pcm16_8k, 2, 1, 8000, 16000, None)
                         samples_accum.extend(pcm16_16k)
 
                         now = asyncio.get_event_loop().time()
-                        # ship every ~120ms or >3200 bytes
                         if len(samples_accum) > 3200 or (now - last_commit) > 0.12:
                             chunk_b64 = base64.b64encode(bytes(samples_accum)).decode()
                             await elws.send(json.dumps({"type": "input_audio_buffer.append", "audio": chunk_b64}))
@@ -159,7 +157,6 @@ async def twilio_stream(ws: WebSocket):
                             await elws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                             samples_accum.clear()
                         break
-                    # ev == "start" → nothing special required here
 
             async def eleven_to_twilio():
                 async for raw in elws:
@@ -167,20 +164,15 @@ async def twilio_stream(ws: WebSocket):
                         data = json.loads(raw)
                     except Exception:
                         continue
-
                     if data.get("type") in ("output_audio.delta", "audio"):
                         b64 = data.get("audio")
                         if not b64:
                             continue
                         pcm16_16k = base64.b64decode(b64)
-                        pcm16_8k, _ = audioop.ratecv(pcm16_16k, 2, 1, 16000, 8000, None)  # 16k→8k
-                        mulaw_8k = audioop.lin2ulaw(pcm16_8k, 2)                             # PCM16 → μ-law
+                        pcm16_8k, _ = audioop.ratecv(pcm16_16k, 2, 1, 16000, 8000, None)
+                        mulaw_8k = audioop.lin2ulaw(pcm16_8k, 2)
                         payload = base64.b64encode(mulaw_8k).decode()
                         await ws.send_text(json.dumps({"event": "media", "media": {"payload": payload}}))
-
-                    if data.get("type") in ("output_audio.done", "response_done"):
-                        # optional: end-of-utterance markers
-                        pass
 
             await asyncio.gather(twilio_to_eleven(), eleven_to_twilio())
 
@@ -190,7 +182,7 @@ async def twilio_stream(ws: WebSocket):
         print("Stream bridge error:", e)
         return
 
-# ---------- OpenAI-compatible endpoints (web demo) ----------
+# ---------- OpenAI-compatible endpoints ----------
 @app.get("/v1/models")
 def list_models():
     return {"object": "list", "data": [{"id": "samaira-agent", "object": "model"}]}
