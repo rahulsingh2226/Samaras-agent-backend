@@ -1,12 +1,12 @@
 import os, json
 from time import time
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 import requests
 
-app = FastAPI(title="Agent Brain for Samaira’s", version="0.4")
+app = FastAPI(title="Agent Brain for Samaira’s", version="0.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,7 +18,7 @@ app.add_middleware(
 BIZ_NAME = "Samaira’s Spa and Wellness"
 HOURS = "Monday to Saturday 10am–6pm; Sunday Closed"
 PRICING = "$80 to $1100"
-POLICY = "24h cancel; $25 late; 50% no-show; deposits for groups"
+POLICY = "24 hour cancel; $25 late; 50% no-show; deposits for groups"
 
 # --- Optional local LLM (Ollama) ---
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -41,7 +41,6 @@ def agent_get():
 # --- Simple FAQ logic ---
 def rule_based_reply(text: str) -> str:
     t = (text or "").lower()
-
     if any(k in t for k in ["hour", "open", "close", "when are you open"]):
         return f"We’re open {HOURS}."
     if any(k in t for k in ["price", "how much", "cost", "rate"]):
@@ -61,7 +60,6 @@ def rule_based_reply(text: str) -> str:
         return "We accept credit cards, debit cards, and cash."
     if any(k in t for k in ["gift card", "voucher", "certificate"]):
         return "Yes, we offer gift cards for all services and packages. They make a great present!"
-
     return "I can help with hours, services, pricing, booking, policies, payments, and gift cards. What would you like to know?"
 
 # --- Optional Ollama ---
@@ -110,7 +108,20 @@ def twilio_voice():
 </Response>"""
     return PlainTextResponse(twiml, media_type="application/xml")
 
-# --- OpenAI-compatible endpoints (for ElevenLabs, optional) ---
+# --- WebSocket endpoint: Twilio streams audio here ---
+@app.websocket("/twilio-stream")
+async def twilio_stream(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive_text()
+            # Right now we just log/ack — integration with ElevenLabs realtime comes next
+            print("Twilio stream frame:", msg[:100])  # preview first chars
+            await ws.send_text('{"event":"keepalive"}')
+    except WebSocketDisconnect:
+        print("Twilio stream disconnected")
+
+# --- OpenAI-compatible endpoints (for ElevenLabs web demo) ---
 @app.get("/v1/models")
 def list_models():
     return {"object": "list", "data": [{"id": "samaira-agent", "object": "model"}]}
