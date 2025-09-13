@@ -6,3 +6,4 @@ requests
 pydantic
 audioop-lts
 websockets
+python-multipart
