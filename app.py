@@ -111,9 +111,12 @@ def twilio_voice():
     twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://samaras-agent-backend.onrender.com/twilio-stream"/>
+    <Stream url="wss://samaras-agent-backend.onrender.com/twilio-stream"
+            track="inbound_audio"
+            statusCallbackEvent="start mark stop"/>
   </Connect>
 </Response>"""
+
     return PlainTextResponse(twiml, media_type="application/xml")
 
 # ---------- Twilio <Stream> ⇄ ElevenLabs Realtime bridge ----------
@@ -134,6 +137,14 @@ async def twilio_stream(ws: WebSocket):
                     msg = await ws.receive_text()
                     data = json.loads(msg)
                     ev = data.get("event")
+
+                    if ev == "start":
+                        # acknowledge start so Twilio knows we’re alive
+                        await ws.send_text(json.dumps({
+                            "event": "mark",
+                            "mark": {"name": "started"}
+                        }))
+                        continue
 
                     if ev == "media":
                         b64 = data["media"]["payload"]
@@ -174,13 +185,20 @@ async def twilio_stream(ws: WebSocket):
                         payload = base64.b64encode(mulaw_8k).decode()
                         await ws.send_text(json.dumps({"event": "media", "media": {"payload": payload}}))
 
-            await asyncio.gather(twilio_to_eleven(), eleven_to_twilio())
+            async def keepalive():
+                # send a Twilio mark every 8s to keep stream from idling out
+                while True:
+                    await asyncio.sleep(8)
+                    await ws.send_text(json.dumps({"event": "mark", "mark": {"name": "keepalive"}}))
+
+            await asyncio.gather(twilio_to_eleven(), eleven_to_twilio(), keepalive())
 
     except WebSocketDisconnect:
         return
     except Exception as e:
         print("Stream bridge error:", e)
         return
+
 
 # ---------- OpenAI-compatible endpoints ----------
 @app.get("/v1/models")
