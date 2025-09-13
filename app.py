@@ -14,9 +14,9 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- Simple business data (demo) ---
+# --- Business data (demo) ---
 BIZ_NAME = "Samaira’s Spa and Wellness"
-HOURS = "Mon–Sat 10am–6pm; Sun Closed"
+HOURS = "Monday to Saturday 10am to 6pm; Sunday Closed"
 PRICING = "$80 to $1100"
 POLICY = "24h cancel; $25 late; 50% no-show; deposits for groups"
 
@@ -38,20 +38,41 @@ def ping():
 def agent_get():
     return {"output": "Hello from Samaira’s backend."}
 
+# --- Simple FAQ logic ---
 def rule_based_reply(text: str) -> str:
     t = (text or "").lower()
+
     if any(k in t for k in ["hour", "open", "close", "when are you open"]):
         return f"We’re open {HOURS}."
+
     if any(k in t for k in ["price", "how much", "cost", "rate"]):
         return f"Our pricing ranges are {PRICING}."
+
+    if any(k in t for k in ["service", "treatment", "what do you offer", "menu"]):
+        return ("We offer massages, facials, body scrubs, wellness packages, "
+                "and relaxation therapies. Would you like details on a specific service?")
+
+    if any(k in t for k in ["location", "where are you", "address", "directions"]):
+        return "We are located in New Hyde Park, NY."
+
     if any(k in t for k in ["book", "appointment", "schedule", "reserve"]):
         return "I can request a booking. May I have your full name, phone, email, the service you want, and a preferred day/time window?"
+
     if any(k in t for k in ["cancel", "refund", "policy", "late"]):
         return f"Our policy is: {POLICY}. Would you like me to email the full policy?"
+
     if any(k in t for k in ["insurance", "medical", "diagnosis"]):
         return "I’m not able to advise on medical or insurance matters. I can transfer you to a team member if you’d like."
-    return "I can help with hours, pricing, services, and booking requests. What would you like to know?"
 
+    if any(k in t for k in ["payment", "card", "cash", "pay"]):
+        return "We accept credit cards, debit cards, and cash."
+
+    if any(k in t for k in ["gift card", "voucher", "certificate"]):
+        return "Yes, we offer gift cards for all services and packages. They make a great present!"
+
+    return "I can help with hours, services, pricing, booking, policies, payments, and gift cards. What would you like to know?"
+
+# --- Optional Ollama ---
 def ollama_reply(text: str) -> str:
     system = ("You are Sarah, a calm, warm, helpful assistant for a spa. "
               "Answer briefly (1–2 sentences). If outside scope, offer to transfer to a human.")
@@ -78,7 +99,7 @@ def generate_reply(user_text: str) -> str:
         pass
     return rule_based_reply(user_text)
 
-# Manual test endpoint
+# --- Manual test ---
 @app.post("/agent")
 async def agent(req: AgentRequest):
     user_text = (req.input or "").strip()
@@ -86,7 +107,7 @@ async def agent(req: AgentRequest):
         return {"output": "Hello! How can I help you today?"}
     return {"output": generate_reply(user_text)}
 
-# ===== OpenAI-compatible endpoints for ElevenLabs =====
+# --- OpenAI-compatible endpoints for ElevenLabs ---
 @app.get("/v1/models")
 def list_models():
     return {"object": "list", "data": [{"id": "samaira-agent", "object": "model"}]}
@@ -99,6 +120,7 @@ async def chat_completions(payload: dict):
         if m and m.get("role") == "user":
             user_text = (m.get("content") or "").strip()
             break
+
     reply = generate_reply(user_text)
     model = payload.get("model", "samaira-agent")
     stream = bool(payload.get("stream"))
@@ -117,14 +139,17 @@ async def chat_completions(payload: dict):
             "usage": {"prompt_tokens": 0, "completion_tokens": len(reply.split()), "total_tokens": len(reply.split())}
         }
 
-    # SSE streaming
     def gen():
         chunk = {
             "id": "chatcmpl-demo",
             "object": "chat.completion.chunk",
             "created": int(time()),
             "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant", "content": reply}, "finish_reason": None}]
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": reply},
+                "finish_reason": None
+            }]
         }
         yield f"data: {json.dumps(chunk)}\n\n"
         yield "data: [DONE]\n\n"
