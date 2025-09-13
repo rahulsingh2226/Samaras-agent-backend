@@ -136,7 +136,7 @@ def twilio_voice():
 # ---------- Twilio <Stream> ⇄ ElevenLabs Realtime bridge ----------
 @app.websocket("/twilio-stream")
 async def twilio_stream(ws: WebSocket):
-    await ws.accept()
+    await ws.accept(subprotocol="audio")
     try:
         async with websockets.connect(get_eleven_ws()) as elws:
             samples_accum = bytearray()
