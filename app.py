@@ -23,11 +23,11 @@ POLICY = "24h cancel; $25 late; 50% no-show; deposits for groups"
 # --------- Rule-based replies ----------
 def rule_based_reply(text: str) -> str:
     t = (text or "").lower()
-    if any(k in t for k in ["hour", "open", "close", "when are you open"]):
+    if any(k in t for k in ["hour", "hours","open", "close", "when are you open"]):
         return f"We’re open {HOURS}."
-    if any(k in t for k in ["price", "how much", "cost", "rate"]):
+    if any(k in t for k in ["pricing", "how much", "cost", "rate"]):
         return f"Our pricing ranges are {PRICING}."
-    if any(k in t for k in ["service", "treatment", "what do you offer", "menu"]):
+    if any(k in t for k in ["service", "services", "treatment", "what do you offer", "menu"]):
         return ("We offer massages, facials, body scrubs, wellness packages, "
                 "and relaxation therapies. Want details on something specific?")
     if any(k in t for k in ["location", "where are you", "address", "directions"]):
