@@ -1,6 +1,7 @@
+pip==24.0
 fastapi
 uvicorn
 gunicorn
 requests
 pydantic
-
+audioop-lts
