@@ -16,9 +16,9 @@ app.add_middleware(
 
 # --------- Business data ----------
 BIZ_NAME = "Samaira’s Spa and Wellness"
-HOURS = "Mon–Sat 10am–6pm; Sun Closed"
+HOURS = "Monday to Saturday 10am to 6pm; Sunday Closed"
 PRICING = "$80 to $1100"
-POLICY = "24h cancel; $25 late; 50% no-show; deposits for groups"
+POLICY = "24 hours free to cancel; $25 late; 50% no-show; deposits for groups"
 
 # --------- Rule-based replies ----------
 def rule_based_reply(text: str) -> str:
